@@ -13,44 +13,43 @@ library(purrr)
 library(readr)
 library(stats)
 library(VineCopula)
+library(xts)
 library(zoo)
 
-#### PREP ####
 set.seed(12896)
-load("data/sectors.rda") # use sectors to get maximum period
-logret <- log(sec.varset$changep + 1) # change to log returns
 period <- "1999/2017" # TEST CONSISTENCY
-ret.xlk <- logret$changep.XLK[period] %>% CutSeriesQuantile
-ret.spy <- logret$changep.SPY[period] # fix a week # different length, have different infomation, 5-10 pretty same
+
+load("../data/sectors.rda") # use sectors to get maximum period
+logret <- log(sec.varset$changep + 1) # change to log returns
+
+ret.xlk <- logret$changep.XLK %>% CutSeriesQuantile
+ret.spy <- logret$changep.SPY %>% CutSeriesQuantile # NOT PERIOD SUBSETTING
+
+mom2w <- ret.spy %>% rollapply(10, sum) %>% na.omit %>% GenEmpQuantileVec
+mom1m <- ret.spy %>% rollapply(21, sum) %>% na.omit %>% GenEmpQuantileVec
+sd2w <- ret.spy %>% rollapply(10, sd) %>% na.omit %>% GenEmpQuantileVec
+sd1m <- ret.spy %>% rollapply(21, sd) %>% na.omit %>% GenEmpQuantileVec
+dsd2w <- ret.spy %>% rollapply(10, function(x) sd(x[x<0])) %>% na.omit %>% GenEmpQuantileVec
+dsd1m <- ret.spy %>% rollapply(21, function(x) sd(x[x<0])) %>% na.omit %>% GenEmpQuantileVec
+asym1m <- ret.spy %>% rollapply(21, function(x) sd(x[x<0])-sd(x[x>0])) %>% na.omit %>% GenEmpQuantileVec
+asym3m <- ret.spy %>% rollapply(21 * 3, function(x) sd(x[x<0])-sd(x[x>0])) %>% na.omit %>% GenEmpQuantileVec
+# CONC: pretty stable variance of regres when applying different length of window
+# CONC: alphas have high auto-corr, low cross-sectional auto-corr  # CONC: should model alpha shocks
+
+list(mom2w, mom1m, sd2w, sd1m, dsd2w, dsd1m, asym1m, asym3m) %>% 
+    lapply(GenHeights, target = ret.xlk %>% lag.xts(-1)) %>% 
+    {do.call(cbind, .)} # keep name conventions
 
 
-#### NUMERIC SIGNAL ####
-quantiles <- ret.spy %>% zoo::rollapply(10, sum) %>% na.omit %>% GenEmpQuantileVec # num signal
+GenHCList <- function(hc.merge, n.group) {
+    hc.merge <- hc$merge; n.group <- 4
 
-  # the rolling window has some shortcomings, lagged responce, not robust, not sensitive to abnormalies
-  # CONC: pretty stable variance of regres when applying different length of window
-  # CONC: alphas have high auto-corr, low cross-sectional auto-corr
-  # CONC: should model alpha shocks
-  # TODO: use olhc to get another kind of beta, but won't be much different
+    clusters <- vector()
+    n <- nrow(hc.merge)
+    crow <- hc.merge[n, ]
 
+    append(clusters, -crow[crow < 0])
+}
 
-#### BOOL & GROUPING ####
-# bools <- GenBoolSignal(quantiles, n.group = 6, cuts = c(0, 1/10, 3/10, 0.5, 1-3/10, 1-1/10, 1))
-bools <- GenBoolSignal(quantiles, n.group = 9) # signals
-groups <- ret.xlk %>% CutSeriesQuantile %>% GenCondGroups(bools) # grouping
-  # conditional distribution var # for XLK, SPY 5days cumret: 1, (2, 3, 4, 10), (5, 6, 7, 8, 9)
-  # par(mfrow = c(3, 2)); groups %>% lapply(., function(x) hist(x, breaks = 200, xlim = c(-0.1, 0.1)))
-
-
-#### DENSITY FITTING ####
-par(mfrow = c(3, 3))
-dens <- GenBKDE(groups, bw = 0.002, gs = 128); dens %>% lapply(., function(x) plot(x, type = 'l'))
-# bbands <- GenBKDEBand(groups, bw = 0.003, n = 1000); bbnoise <- lapply(bbands, function(df) df[, 2] - df[, 1]) # bb std
-
-
-#### CLUSTERING ####
-odens <- GenBKDE(ret.xlk)[[1]]; range <- range(ret.xlk)
-idx <- seq(from = range[1], to = range[2], length.out = length(odens)) # cbind(idx, odens[[1]])
-dmat <- sapply(1:length(groups), function(i) {sapply(1:length(groups), function(j) {DistUR(dens, i, j, idx)})}) %>% as.dist
-hc <- hclust(dmat*100, method = "complete"); plot(hc); hc$height # if n.group large (20), height increase, but some from sampling noise
-  # spotify high/low volatility situation # decision making for cutting conditions: eyeballing for now
+# if n.group large (20), height increase, but some from sampling noise
+# TODO: write a signal diagnosis module

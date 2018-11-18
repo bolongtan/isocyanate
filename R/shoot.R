@@ -1,3 +1,54 @@
+#' Generate Top 3 Heights, shooting a bullet 
+#' 
+#' @param bullet,target xts time series object, might have diff period  
+#' @param n.top int number of top heighs required for the report
+#' @return vector of top heights using the bullet hitting the target
+#' @importFrom magrittr %>%
+#' @export
+GenHeights <- function(bullet = asym1m, target = ret.xlk %>% lag.xts(-1), n.top = 3) {
+  bools <- bullet %>% GenBoolSignal(n.group = 9) # cuts = c(0, 1/10, 3/10, 0.5, 1-3/10, 1-1/10, 1))
+  groups <- target %>% na.omit %>% CutSeriesQuantile %>% GenCondGroups(bools) 
+  fitted.bkde <- GenBKDE(groups, bw = 0.002, gs = 128); dens <- fitted.bkde$dens; axis <- fitted.bkde$axis
+  # bbands <- GenBKDEBand(groups, bw = 0.003, n = 1000); bbnoise <- lapply(bbands, function(df) df[, 2] - df[, 1]) 
+
+  hc <- sapply(1:length(groups), function(i) {sapply(1:length(groups), function(j) {DistUR(dens, i, j, axis)})}) %>% 
+      as.dist %>% {hclust(.*100, method = "average")}
+  # png(file = "./images/tmp.png", bg = "white"); plot(hc); dev.off()
+  hc$height %>% {.[(length(.) - (n.top - 1)):length(.)]}
+}
+
+
+#' Generate conditional groups based on bool signals and a variable/return xts
+#'
+#' @param ret xts variable/return
+#' @param bools a 2d xts bool, Vector{1dxts{bool}}
+#' @return a list of 1dxts, same size as bools
+#' @importFrom magrittr %>%
+#' @export
+GenCondGroups <- function(ret, bools) {
+  lapply(bools, function(bool) {xts::merge.xts(ret, bool) %>% stats::na.omit() %>%
+      `colnames<-`(c('ret', 'idx')) %>% {.$ret[.$idx != 0]}})
+}
+
+
+#' Generate bool signal vector for a given continuous 0-1 (quantile) signal
+#'
+#' @param signal xts numerical from 0 to 1, i.e. from GenEmpQuantileVec
+#' @param n.group int number of groups divided
+#' @param cuts vector of number used to divide groups
+#' @examples
+#'   GenBoolSignal(quantiles, 6, cuts = c(0, 1/10, 3/10, 0.5, 1-3/10, 1-1/10, 1))
+#'   GenBoolSignal(quantiles, 10)
+#' @importFrom magrittr %>%
+#' @export
+GenBoolSignal <- function(signal, n.group = 10, cuts = seq(0, 1, 1/n.group)) {
+  stopifnot(range(signal)[1] >= 0 && range(signal)[2] <= 1)
+  lapply(1:n.group, function(i) {
+    (signal < cuts[i+1] & signal >= cuts[i]) %>% xts::xts(zoo::index(signal))
+  }) # bool 2d signals with same index as the numeric signal and MIGHT HAVE NAs
+}
+
+
 #' Generate Bootstrap Band for KernSmooth
 #'
 #' @param groups conditional variable series from GenCondGroups
@@ -51,11 +102,13 @@ GenASHBand <- function(groups, nbin = 128, n = 1000, pctg = 0.8) {
 #' @import KernSmooth
 #' @export
 GenBKDE <- function(groups, bw = 0.003, gs = 128L, range = NULL) { # how to tune?
-  lapply(groups, function(group) {
-    if (is.null(range)) {range <- range(groups)}
-    bkde(group, "normal", FALSE, bw, gs, range)$y %>%
-      {./sum(.)}
-  })
+  if (is.null(range)) {range <- range(groups)} # use range in a whole
+  list(
+    "dens" = lapply(groups, function(group) { 
+        bkde(group, "normal", FALSE, bw, gs, range)$y %>% {./sum(.)}
+    }),
+    "axis" = bkde(groups[[1]], "normal", FALSE, bw, gs, range)$x
+  )
 }
 
 
@@ -97,5 +150,5 @@ DistSQ <- function(dens, i, j) {sum((dens[[i]] - dens[[j]]) ^ 2)}
 DistUR <- function(dens, i, j, idx, gamma = 0.6) {
   U <- seq(1, length(dens[[1]])) %>% {(.^(1-gamma)-1)/(1-gamma)}
   R <- U %>% {abs(.-.[which.min(abs(idx))]) %>% {./sum(.)}}
-  sum((dens[[i]] - dens[[j]]) * R)
+  sum((dens[[i]] - dens[[j]]) ^ 2 * R)
 } # adjusted measure for distance, give more weights to tail, and consider asymmetry
